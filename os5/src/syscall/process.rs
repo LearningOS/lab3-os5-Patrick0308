@@ -3,8 +3,8 @@
 use crate::loader::get_app_data_by_name;
 use crate::mm::{translated_refmut, translated_str};
 use crate::task::{
-    add_task, current_task, current_user_token, exit_current_and_run_next,
-    suspend_current_and_run_next, TaskStatus,
+    add_task, take_current_task, current_task, current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, TaskStatus, TaskControlBlock
 };
 use crate::timer::get_time_us;
 use alloc::sync::Arc;
@@ -106,8 +106,13 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 }
 
 // YOUR JOB: 引入虚地址后重写 sys_get_time
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    let _us = get_time_us();
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let us = get_time_us();
+    let ts = translated_refmut::<TimeVal>(current_user_token(), ts);
+    *ts = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
     // unsafe {
     //     *ts = TimeVal {
     //         sec: us / 1_000_000,
@@ -119,26 +124,58 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 
 // YOUR JOB: 引入虚地址后重写 sys_task_info
 pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
-    -1
+    let us = get_time_us();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let translated = translated_refmut::<TaskInfo>(current_user_token(), ti);
+
+    *translated = TaskInfo {
+        status: inner.task_status,
+        syscall_times: inner.syscall_times,
+        time: (us - inner.start_time) / 1_000,
+    };
+    0
 }
 
 // YOUR JOB: 实现sys_set_priority，为任务添加优先级
-pub fn sys_set_priority(_prio: isize) -> isize {
-    -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    if prio < 2 {
+        return -1;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.prio = prio;
+    prio 
 }
 
 // YOUR JOB: 扩展内核以实现 sys_mmap 和 sys_munmap
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    -1
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.memory_set.mmap(start, len, port)
 }
 
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.memory_set.munmap(start, len)
 }
 
 //
 // YOUR JOB: 实现 sys_spawn 系统调用
 // ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
-pub fn sys_spawn(_path: *const u8) -> isize {
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    let path = translated_str(current_user_token(), path);
+    match get_app_data_by_name(path.as_str()) {
+        Some(data) => {
+            let current = current_task().unwrap();
+            let child = Arc::new(TaskControlBlock::new(data));
+            let child_pid = child.pid.0;
+            current.inner_exclusive_access().children.push(Arc::clone(&child));
+            child.inner_exclusive_access().parent = Some(Arc::downgrade(&current));
+            add_task(child);
+            child_pid as isize
+        }
+        None => -1
+    } 
 }

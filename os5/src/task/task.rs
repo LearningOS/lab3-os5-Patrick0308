@@ -2,13 +2,14 @@
 
 use super::TaskContext;
 use super::{pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT;
+use crate::config::{TRAP_CONTEXT,MAX_SYSCALL_NUM};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -46,6 +47,10 @@ pub struct TaskControlBlockInner {
     pub children: Vec<Arc<TaskControlBlock>>,
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    pub start_time: usize,
+    pub pass: isize,
+    pub prio: isize,
 }
 
 /// Simple access to its internal fields
@@ -103,6 +108,10 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
+                    pass: 0,
+                    prio: 16,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    start_time: 0,
                 })
             },
         };
@@ -170,6 +179,10 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
+                    pass: 0,
+                    prio: 16,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    start_time: 0,
                 })
             },
         });
@@ -188,6 +201,29 @@ impl TaskControlBlock {
         self.pid.0
     }
 }
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, o: &Self) -> Ordering {
+        let spass = self.inner_exclusive_access().pass;
+        let opass = o.inner_exclusive_access().pass;
+        opass.cmp(&spass)
+    }
+}
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        let spass = self.inner_exclusive_access().pass;
+        let opass = o.inner_exclusive_access().pass;
+        opass.partial_cmp(&spass)
+    }
+}
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, o: &Self) -> bool {
+        let spass = self.inner_exclusive_access().pass;
+        let opass = o.inner_exclusive_access().pass;
+        spass == opass
+    }
+}
+impl Eq for TaskControlBlock {}
 
 #[derive(Copy, Clone, PartialEq)]
 /// task status: UnInit, Ready, Running, Exited

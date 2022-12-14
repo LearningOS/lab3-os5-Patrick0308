@@ -252,6 +252,56 @@ impl MemorySet {
         //*self = Self::new_bare();
         self.areas.clear();
     }
+
+    pub fn mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
+        if start & (PAGE_SIZE - 1) != 0 || port > 7usize || port == 0 {
+            return -1;
+        }
+
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len).ceil();
+        for vpn in (start_vpn.0..end_vpn.0).filter(|x| (x % PAGE_SIZE == 0)) {
+            match self.page_table.find_pte_create(VirtPageNum::from(vpn)) {
+                Some(pte) => {
+                    if pte.is_valid() {
+                        return -1;
+                    }   
+                }
+                None => {return -1;}
+            }
+        }
+        let permission = MapPermission::from_bits((port as u8) << 1).unwrap() | MapPermission::U;
+        self.insert_framed_area(VirtAddr::from(start), VirtAddr::from(start+len), permission);
+        0
+    }
+
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        if start & (PAGE_SIZE - 1) != 0 || len % PAGE_SIZE != 0 {
+            return -1;
+        }
+
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len).ceil();
+        for vpn in (start_vpn.0..end_vpn.0).filter(|x| (x % PAGE_SIZE == 0))  {
+            match self.translate(VirtPageNum::from(vpn)) {
+                Some(pte) => {
+                    if !pte.is_valid() {
+                        return -1;
+                    }   
+                }
+                None => {return -1;}
+            }
+        }
+        let vpn_range = VPNRange::new(start_vpn, end_vpn);
+        for vpn in vpn_range {
+            for area in &mut self.areas {
+                if vpn < area.vpn_range.get_end() && vpn >= area.vpn_range.get_start() {
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+            }
+        }
+        0
+    }
 }
 
 /// map area structure, controls a contiguous piece of virtual memory
